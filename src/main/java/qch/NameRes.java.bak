@@ -1,0 +1,654 @@
+package com.hdyh.mapreduce;
+
+import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.*;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
+import org.apache.hadoop.hbase.mapreduce.TableMapper;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+import com.hdyh.util.PostUtil;
+
+public class NameRes {
+	// 作成时间格式
+	private static SimpleDateFormat dateformat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+	// 数据源表名
+	private static String INPUT_TABLENAME = "qchtest";
+	// 输出文件路径
+	private static String OUTPUT_PATH = "/qchtest/result";
+	// 加密方式
+	private static String DIGEST = "MD5";
+	// 分隔符号
+	private static String MARK = "`";
+
+	// 寄件区分
+	private static String REC = "REC";
+	// 收件区分
+	private static String SEN = "SEN";
+
+	// 去重方法：默认
+	private static String DISTINCT_TYPE_DEFAULT = "default";
+	// 去重方法：移动电话为主
+	private static String DISTINCT_TYPE_MOBILE = "mobile";
+	// 去重方法：身份证号为主
+	private static String DISTINCT_TYPE_ID = "id";
+	
+	public static void main(String[] args) throws Exception {
+
+		Configuration config = new Configuration();
+		config.set("fs.defautl.name", "dscn31:9000");
+		config.set("hbase.zookeeper.property.clientPort", "2181");
+		config.set("hbase.zookeeper.quorum", "dscn31,dscn32,dscn33");
+		config.set("dfs.socket.timeout", "180000");
+		//设置去重方式
+		config.set("distinct.type", args[0]);
+
+		Job job = Job.getInstance(config);
+		// 设置作业名称
+		job.setJobName("NameAddressCount");
+		// 设置作业执行类
+		job.setJarByClass(NameRes.class);
+		// 设置reduce处理类
+		job.setReducerClass(NameAdressReduce.class);
+		// 设置输出类型
+		job.setMapOutputKeyClass(Text.class);
+		job.setMapOutputValueClass(Text.class);
+		// 设置输入文件路径
+		FileOutputFormat.setOutputPath(job, new Path(OUTPUT_PATH));
+
+		// 查询条件：全表
+		Scan scan = new Scan();
+		// 设置hbase作为map的输入条件
+		TableMapReduceUtil.initTableMapperJob(
+				INPUT_TABLENAME, scan, NameAddressMapper.class, Text.class, Text.class, job);
+
+		if (job.waitForCompletion(true)) {
+			System.exit(0);
+		} else {
+			System.exit(1);
+		}
+	}
+
+	/**
+	 * Mapper类
+	 */
+	static class NameAddressMapper extends TableMapper<Text, Text> {
+		/**
+		 * Map处理
+		 */
+		@Override
+		protected void map(ImmutableBytesWritable key, Result value,
+				Mapper<ImmutableBytesWritable, Result, Text, Text>.Context context) 
+						throws IOException, InterruptedException {
+			System.out.println("[QCH][Mapper]map Start.");
+
+			// 取得去重方式
+			String distinctType = context.getConfiguration().get("distinct.type");
+			System.out.println("[QCH][Mapper]distinctType=" + distinctType);
+
+			// 初始化表单数据
+			ZMMDBean bean = new ZMMDBean(value);
+			System.out.println("[QCH][Mapper]bean=" + bean.toString());
+
+			// 数据拆分处理
+			if (distinctType.equals(DISTINCT_TYPE_MOBILE)) {
+				this.writeDistinctByMobile(context, bean);
+			} else if (distinctType.equals(DISTINCT_TYPE_ID)) {
+				this.writeDistinctById(context, bean);
+			} else {
+				this.writeDistinctDefault(context, bean);
+			}
+		}
+
+		/**
+		 * 默认方式。去重Key为：移动电话 + 固定电话 + 姓名 + 地址
+		 * @param context
+		 * @param bean
+		 * @throws IOException
+		 * @throws InterruptedException
+		 */
+		private void writeDistinctDefault(
+				Context context, ZMMDBean bean) throws IOException, InterruptedException {
+			System.out.println("[QCH][Mapper]writeDistinctDefault Start.");
+
+			// 寄件Key：
+			Text senKey = new Text(getMD5(connString(
+					bean.getSenMobile(),				// 寄件人移动电话 
+					bean.getSenHomePhone(),				// 寄件人固定电话
+					bean.getSenName(),					// 寄件人姓名
+					bean.getSenAddress()).toString()));	// 寄件详细地址
+			System.out.println("[QCH][Mapper]writeDistinctDefault senKey=" + senKey);
+
+			// 寄件Value
+			String senValue = connString(senKey.toString(), bean.getSenInfo());
+			System.out.println("[QCH][Mapper]writeDistinctDefault senValue=" + senValue);
+
+			// 收件Key
+			Text recKey = new Text(getMD5(connString(
+					bean.getRecMobile(),				// 收件人移动电话
+					bean.getRecHomePhone(),				// 收件人固定电话
+					bean.getRecName(),					// 收件人姓名
+					bean.getRecAddress()).toString()));	// 收件详细地址
+			System.out.println("[QCH][Mapper]writeDistinctDefault recKey=" + recKey);
+
+			// 收件Value
+			String recValue = connString(recKey.toString(), bean.getRecInfo());
+			System.out.println("[QCH][Mapper]writeDistinctDefault recValue=" + recValue);
+
+			// 输出拆分结果
+			context.write(new Text(senKey), new Text(senValue));
+			context.write(new Text(recKey), new Text(recValue));
+
+			System.out.println("[QCH][Mapper]writeDistinctDefault End.");
+		}
+
+		/**
+		 * 以移动电话为主。去重Key为：移动电话 + 姓名 + 地址
+		 * @param context
+		 * @param bean
+		 * @throws IOException
+		 * @throws InterruptedException
+		 */
+		private void writeDistinctByMobile(
+				Context context, ZMMDBean bean) throws IOException, InterruptedException {
+			System.out.println("[QCH][Mapper]writeDistinctByMobile Start.");
+
+			// 寄件Key：
+			Text senKey = new Text(getMD5(connString(
+					bean.getSenMobile(),				// 寄件人移动电话 
+					bean.getSenName(),					// 寄件人姓名
+					bean.getSenAddress()).toString()));	// 寄件详细地址
+			System.out.println("[QCH][Mapper]writeDistinctByMobile senKey=" + senKey);
+
+			// 寄件Value
+			String senValue = connString(senKey.toString(), bean.getSenInfo());
+			System.out.println("[QCH][Mapper]writeDistinctByMobile senValue=" + senValue);
+
+			// 收件Key
+			Text recKey = new Text(getMD5(connString(
+					bean.getRecMobile(),				// 收件人移动电话
+					bean.getRecName(),					// 收件人姓名
+					bean.getRecAddress()).toString()));	// 收件详细地址
+			System.out.println("[QCH][Mapper]writeDistinctByMobile recKey=" + recKey);
+
+			// 收件Value
+			String recValue = connString(recKey.toString(), bean.getRecInfo());
+			System.out.println("[QCH][Mapper]writeDistinctByMobile recValue=" + recValue);
+
+			// 输出拆分结果
+			context.write(new Text(senKey), new Text(senValue));
+			context.write(new Text(recKey), new Text(recValue));
+
+			System.out.println("[QCH][Mapper]writeDistinctByMobile End.");
+		}
+
+		/**
+		 * 以身份证号为主。去重Key为：身份证号
+		 * @param context
+		 * @param bean
+		 * @throws IOException
+		 * @throws InterruptedException
+		 */
+		private void writeDistinctById(
+				Context context, ZMMDBean bean) throws IOException, InterruptedException {
+			System.out.println("[QCH][Mapper]writeDistinctById Start.");
+
+			// 寄件Key：寄件人身份证号
+			Text senKey = new Text(getMD5(connString(bean.getSenId())));
+			System.out.println("[QCH][Mapper]writeDistinctById senKey=" + senKey);
+
+			// 寄件Value
+			String senValue = connString(senKey.toString(), bean.getSenInfo());
+			System.out.println("[QCH][Mapper]writeDistinctById senValue=" + senValue);
+
+			// 收件Key：收件人身份证号
+			Text recKey = new Text(getMD5(connString(bean.getRecId())));
+			System.out.println("[QCH][Mapper]writeDistinctById recKey=" + recKey);
+
+			// 收件Value
+			String recValue = connString(recKey.toString(), bean.getRecInfo());
+			System.out.println("[QCH][Mapper]writeDistinctById recValue=" + recValue);
+
+			// 输出拆分结果
+			context.write(new Text(senKey), new Text(senValue));
+			context.write(new Text(recKey), new Text(recValue));
+
+			System.out.println("[QCH][Mapper]writeDistinctById End.");
+		}
+	}
+
+	/**
+	 * Reducer类
+	 */
+	static class NameAdressReduce extends Reducer<Text, Text, NullWritable, Text> {
+		/**
+		 * Reduce处理
+		 */
+		@Override
+		protected void reduce(Text key, Iterable<Text> values, Context context)
+				throws IOException, InterruptedException {
+			System.out.println("[QCH][Reducer]reduce Start.");
+
+			// 取得去重方式
+			String distinctType = context.getConfiguration().get("distinct.type");
+			System.out.println("[QCH][Reducer]distinctType=" + distinctType);
+
+			String writevalue = this.margeColumn(values, distinctType);
+			System.out.println("[QCH][Reducer]reduce writevalue=" + writevalue);
+
+			context.write(NullWritable.get(), new Text(writevalue));
+		}
+
+		/**
+		 * 去重处理
+		 * 方针：数据冲突时，使用反映寄件日期较新的信息。
+		 * @param values
+		 * @param type
+		 * @return
+		 * @throws InterruptedException 
+		 */
+		private String margeColumn(Iterable<Text> values, String type) {
+			System.out.println("[QCH][Reducer]margeColumn Start");
+
+			boolean isRec = false;
+			boolean isSen = false;
+			String recSen = "0";
+			String[] newestValue = null;
+			String[] resultValue = null;
+			Date newestDate = null;
+
+			for (Text value : values) {
+				String[] currentValue = value.toString().split(MARK);
+				System.out.println("[QCH][Reducer]margeColumn currentValue=" + currentValue.toString());
+
+				// 寄件日期(Date)
+				Date currentDate = convertStrToDate(currentValue[7]);
+				System.out.println("[QCH][Reducer]margeColumn datetime=" + currentDate);
+
+				// 寄件收件区分
+				String sign = currentValue[8];
+				System.out.println("[QCH][Reducer]margeColumn sign=" + sign);
+
+				// 初期化比较用变量
+				if (resultValue == null) {
+					newestDate = currentDate;
+					newestValue = currentValue.clone();
+					resultValue = currentValue.clone();
+				}
+
+				// 统计寄件/收件区分
+				if (sign.equals(SEN)) {
+					isSen = true;
+				}
+
+				if (sign.equals(REC)) {
+					isRec = true;
+				}
+
+				// 默认模式的时候，只需要统计寄件/收件区分
+				if (type.equals(DISTINCT_TYPE_DEFAULT)) {
+					if (isRec && isSen) {
+						System.out.println("[QCH][Reducer]margeColumn DISTINCT_TYPE_DEFAULT end.");
+						break;
+					}
+				}
+
+				// 取得最新的数据
+				if (currentDate.compareTo(newestDate) > 0) {
+					newestDate = currentDate;
+					newestValue = currentValue.clone();
+				}
+
+				// 更新字段
+				updateNewestValue(resultValue, newestValue, currentValue, type);
+			}
+
+			// 计算寄件/收件区分
+			if (isRec && isSen) {
+				recSen = "3";
+			} else if (isRec && !isSen) {
+				recSen = "2";
+			} else if (!isRec && isSen) {
+				recSen = "1";
+			} else {
+				recSen = "0";
+			}
+
+			// 转换成文字列
+			String joinstr = org.apache.commons.lang.StringUtils.join(resultValue, MARK);
+			System.out.println("[QCH][Reducer]margeColumn joinstr=" + joinstr);
+
+			// 追加寄件/收件区分、追加作成时间
+			return connString(joinstr, recSen, getSystemDate());
+		}
+
+		/**
+		 * 以寄件日期为标准，按照不同的模式，合并相关字段
+		 * @param newestValue
+		 * @param newestTime
+		 * @param currentValue
+		 * @param currentTime
+		 * @param type
+		 * @throws InterruptedException 
+		 */
+		private void updateNewestValue(String[] result, String[] newest, String[] current, String type) {
+			System.out.println("[QCH][Reducer]updateNewestValue Start");
+
+			int[] updateItem = null;
+			int[] updateItemDefault = new int[] {
+				0,	// 0:Key		MD5不更新
+				0,	// 1:姓名		Key不更新
+				0,	// 2:移动电话	Key不更新
+				0,	// 3:固定电话	Key不更新
+				0,	// 4:详细地址	Key不更新
+				1,	// 5:身份证号	更新
+				1,	// 6:二维码		更新
+				1};	// 7:寄件日期	更新
+
+			int[] updateItemMobile = new int[] {
+				0,	// 0:Key		MD5不更新
+				0,	// 1:姓名		Key不更新
+				0,	// 2:移动电话	Key不更新
+				1,	// 3:固定电话	更新
+				0,	// 4:详细地址	Key不更新
+				1,	// 5:身份证号	更新
+				1,	// 6:二维码		更新
+				1};	// 7:寄件日期	更新
+
+			int[] updateItemId = new int[] {
+				0,	// 0:Key		MD5不更新
+				1,	// 1:姓名		更新
+				1,	// 2:移动电话	更新
+				1,	// 3:固定电话	更新
+				1,	// 4:详细地址	更新
+				0,	// 5:身份证号	Key不更新
+				1,	// 6:二维码		更新
+				1};	// 7:寄件日期	更新
+
+			if (type.equals(DISTINCT_TYPE_MOBILE)) {
+				updateItem = updateItemMobile;
+			} else if (type.equals(DISTINCT_TYPE_ID)) {
+				updateItem = updateItemId;
+			} else {
+				updateItem = updateItemDefault;
+			}
+
+			for (int i = 0; i < updateItem.length; i++) {
+				// 为0时不需要更新字段
+				if (updateItem[i] == 0) {
+					continue;
+				}
+
+				boolean newestIsNull = false;
+				if (newest[i] == null || newest[i].trim().isEmpty() || newest[i].equals("null")) {
+					newestIsNull = true;
+				}
+				boolean resultIsNull = false;
+				if (result[i] == null || result[i].trim().isEmpty() || result[i].equals("null")) {
+					resultIsNull = true;
+				}
+
+				if (resultIsNull) {
+					if (newestIsNull) {
+						result[i] = current[i];
+					} else {
+						result[i] = newest[i];
+					}
+				} else {
+					if (newestIsNull) {
+						continue;
+					} else {
+						result[i] = newest[i];
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * 连接多个文字列
+	 * @param args
+	 * @return 连接后文字列
+	 */
+	private static String connString(String... args) {
+		StringBuffer result = new StringBuffer();
+		for (int i = 0; i < args.length; i++) {
+			if (i != 0) {
+				result.append(MARK);
+			}
+			result.append(args[i]);
+		}
+		return result.toString();
+	}
+
+	/**
+	 * 对指定文字列进行加密转换
+	 * @param str
+	 * @return 加密后文字列
+	 */
+	private static String getMD5(String str) {
+		byte buf[] = null;
+        try {
+            MessageDigest md = MessageDigest.getInstance(DIGEST);
+            md.update(str.getBytes());
+            buf = md.digest();
+        } catch (NoSuchAlgorithmException e) {
+            return null;
+        }
+
+        StringBuffer sb = new StringBuffer(buf.length * 2);
+        for (int i = 0; i < buf.length; i++) {
+            sb.append(Character.forDigit((buf[i] & 240) >> 4, 16));
+            sb.append(Character.forDigit(buf[i] & 15, 16));
+        }
+
+        return sb.toString();
+	}
+
+	/**
+	 * 取得当前系统时间
+	 * @return 格式化后文字列
+	 */
+	public static String getSystemDate() {
+		Date nowTime = new Date(System.currentTimeMillis());
+		String systemDate = dateformat.format(nowTime);
+		return systemDate;
+	}
+
+	public static Date convertStrToDate(String str) {
+		Date date = null;
+		try {
+			date = dateformat.parse(str);
+		} catch (ParseException e) {
+			System.out.println("[QCH][ERROE]Convert String to Date has error.");
+			e.printStackTrace();
+		}
+
+		return date;
+	}
+
+	/**
+	 * 转码面单表Bean Class
+	 */
+	private static class ZMMDBean {
+		// 列族
+	    private static byte[] FAMILY = Bytes.toBytes("info");
+
+		// 寄件人姓名
+		private static byte[] SEN_NAME = Bytes.toBytes("SEN_NAME");
+		private String sen_name = null;
+		public String getSenName() {
+			return sen_name;
+		}
+
+		// 寄件人移动电话
+		private static byte[] SEN_MOBILE = Bytes.toBytes("SEN_MOBILE");
+		private String sen_mobile = null;
+		public String getSenMobile() {
+			return sen_mobile;
+		}
+
+		// 寄件人固定电话
+		private static byte[] SEN_HOMEPHONE = Bytes.toBytes("SEN_PHONE");
+		private String sen_homephone = null;
+		public String getSenHomePhone() {
+			return sen_homephone;
+		}
+
+		// 寄件人地址
+		private static byte[] SEN_ADDRESS = Bytes.toBytes("SEN_ADDRESS");
+		private String sen_address = null;
+		public String getSenAddress() {
+			return sen_address;
+		}
+
+		// 寄件人身份证号
+		private static byte[] SEN_ID = Bytes.toBytes("SEN_ID");
+		private String sen_id = null;
+		public String getSenId() {
+			return sen_id;
+		}
+
+		// 寄件人二维码
+		private static byte[] SEN_QRCODE = Bytes.toBytes("SEN_QRCODE");
+		private String sen_qrcode = null;
+		public String getSenQrcode() {
+			return sen_qrcode;
+		}
+
+		// 收件人姓名
+		private static byte[] REC_NAME = Bytes.toBytes("REC_NAME");
+		private String rec_name = null;
+		public String getRecName() {
+			return rec_name;
+		}
+
+		// 收件人移动电话
+		private static byte[] REC_MOBILE = Bytes.toBytes("REC_MOBILE");
+		private String rec_mobile = null;
+		public String getRecMobile() {
+			return rec_mobile;
+		}
+
+		// 收件人固定电话
+		private static byte[] REC_HOMEPHONE = Bytes.toBytes("REC_PHONE");
+		private String rec_homephone = null;
+		public String getRecHomePhone() {
+			return rec_homephone;
+		}
+
+		// 收件人的地址
+		private static byte[] REC_ADDRESS = Bytes.toBytes("REC_ADDRESS");
+		private String rec_address = null;
+		public String getRecAddress() {
+			return rec_address;
+		}
+
+		// 收件人身份证号
+		private static byte[] REC_ID = Bytes.toBytes("REC_ID");
+		private String rec_id = null;
+		public String getRecId() {
+			return rec_id;
+		}
+
+		// 收件人二维码
+		private static byte[] REC_QRCODE = Bytes.toBytes("REC_QRCODE");
+		private String rec_qrcode = null;
+		public String getRecQrcode() {
+			return rec_qrcode;
+		}
+
+		// 寄件日期
+		private static byte[] MAIL_DATETIME = Bytes.toBytes("MAIL_DATETIME");
+		private String mail_datetime = null;
+		public String getMailDatetime() {
+			return mail_datetime;
+		}
+		
+		/**
+		 * 寄件信息
+		 * @param bean
+		 * @param key
+		 * @return
+		 */
+		public String getSenInfo() {
+			String senValue = connString(
+				this.getSenName(),					// 寄件人姓名
+				this.getSenMobile(),				// 寄件人移动电话 
+				this.getSenHomePhone(),				// 寄件人固定电话
+				this.getSenAddress(),				// 寄件详细地址
+				this.getSenId(),					// 寄件人身份证号
+				this.getSenQrcode(),				// 寄件人二维码
+				this.getMailDatetime(),				// 寄件日期
+				SEN);								// 寄件标记
+
+			return senValue;
+		}
+
+		/**
+		 * 收件信息
+		 * @param bean
+		 * @param key
+		 * @return
+		 */
+		public String getRecInfo() {
+			String recValue = connString(
+				this.getRecName(),					// 收件人姓名
+				this.getRecMobile(),				// 收件人移动电话
+				this.getRecHomePhone(),				// 收件人固定电话
+				this.getRecAddress(),				// 收件详细地址
+				this.getRecId(),					// 收件人身份证号
+				this.getRecQrcode(),				// 收件人二维码
+				this.getMailDatetime(),				// 寄件日期
+				REC);								// 收件标记
+
+			return recValue;
+		}
+
+		public ZMMDBean(Result value) {
+			// 寄件人姓名
+			sen_name = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_NAME));
+			// 寄件人移动电话
+			sen_mobile = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_MOBILE));
+			// 寄件人固定电话
+			sen_homephone = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_HOMEPHONE));
+			// 寄件人地址
+			sen_address = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_ADDRESS));
+			// 寄件人身份证号
+			sen_id = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_ID));
+			// 寄件人二维码
+			sen_qrcode = PostUtil.getStrByByte(value.getValue(FAMILY, SEN_QRCODE));
+
+			// 收件人姓名
+			rec_name = PostUtil.getStrByByte(value.getValue(FAMILY, REC_NAME));
+			// 收件人移动电话
+			rec_mobile = PostUtil.getStrByByte(value.getValue(FAMILY, REC_MOBILE));
+			// 收件人固定电话
+			rec_homephone = PostUtil.getStrByByte(value.getValue(FAMILY, REC_HOMEPHONE));
+			// 收件人的地址
+			rec_address = PostUtil.getStrByByte(value.getValue(FAMILY, REC_ADDRESS));
+			// 收件人身份证号
+			rec_id = PostUtil.getStrByByte(value.getValue(FAMILY, REC_ID));
+			// 收件人二维码
+			rec_qrcode = PostUtil.getStrByByte(value.getValue(FAMILY, REC_QRCODE));
+
+			// 寄件日期
+			mail_datetime = PostUtil.getStrByByte(value.getValue(FAMILY, MAIL_DATETIME));
+		}
+	}
+}
