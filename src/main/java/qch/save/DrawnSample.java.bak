@@ -1,0 +1,285 @@
+package com.hdyh.mapreduce;
+
+import java.io.IOException;
+import java.util.Date;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
+import org.apache.hadoop.hbase.mapreduce.TableMapper;
+import org.apache.hadoop.hbase.mapreduce.TableOutputFormat;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.mapreduce.Job;
+
+import com.hdyh.hbaseWrite.DrawnSampleWiter;
+import com.hdyh.util.Constants;
+import com.hdyh.util.PostUtil;
+
+public class DrawnSample {
+	// 历史大表列族
+    private static byte[] FAMILY_LS = Bytes.toBytes("info");
+    // 抽样结果表列族
+    private static byte[] FAMILY_CY = Bytes.toBytes("info");
+    // 指定抽样日
+    private static int DRAWN_DAYS = 7;
+    // 不满足
+    private static String NO = "N";
+    // 满足
+    private static String YES = "Y";
+    
+	/**
+	 * Mapper类
+	 */
+	static class DrawnSampleMapper extends TableMapper<ImmutableBytesWritable, Put> {
+		/**
+		 * Map处理
+		 */
+		@Override
+		protected void map(ImmutableBytesWritable key, Result value, Context context) throws IOException, InterruptedException {
+			//企业编码
+			String enterprise_code = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.ENTERPRISE_CODE));
+			//详情单号码
+			String mail_no = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.MAIL_NO));
+			//业务日期
+			String biz_date = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.BIZ_DATE));
+			Date biz_date_d = PostUtil.dateToStr(biz_date);
+			//产品类型
+			String product_type = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.PRODUCT_TYPE));
+			//寄达范围
+			String reach_range = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.REACH_RANGE));
+			//最早扫描时间
+			String first_time = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.FIRST_TIME));
+			//实际揽收时间（第一次出现揽收最早时间）
+			String coll_time = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.COLL_TIME));
+			Date coll_time_d = PostUtil.dateToStr(coll_time);
+			//实际派送时间（第一次出现派送最晚时间）
+			String disp_time = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.DISP_TIME));
+			Date disp_time_d = PostUtil.dateToStr(disp_time);
+			//实际签收时间（第一次出现签收最早时间）
+			String sign_time = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.SIGN_TIME));
+			Date sign_time_d = PostUtil.dateToStr(sign_time);
+			//实际揽收网点（第一次出现揽收最早时间网点）
+			String coll_station = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.COLL_STATION));
+			//寄出地城市代码
+			String send_city_code = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.SEND_CITY_CODE));
+			//目的地城市代码
+			String dest_city_code = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.DEST_CITY_CODE));
+			//最早出现城市
+			String first_appear_city = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.FIRST_APPEAR_CITY));
+			//最早出现城市最早处理时间
+			String first_appear_city_ftime = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.FIRST_APPEAR_CITY_FTIME));
+			//最早出现城市最晚处理时间
+			String first_appear_city_ltime = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.FIRST_APPEAR_CITY_LTIME));
+			Date first_appear_city_ltime_d = PostUtil.dateToStr(first_appear_city_ltime);
+			//最晚出现城市
+			String last_appear_city = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.LAST_APPEAR_CITY));
+			//最晚出现城市最早处理时间
+			String last_appear_city_ftime = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.LAST_APPEAR_CITY_FTIME));
+			Date last_appear_city_ftime_d = PostUtil.dateToStr(last_appear_city_ftime);
+			//最晚出现城市最晚处理时间
+			String last_appear_city_ltime = PostUtil.getStrByByte(value.getValue(FAMILY_LS, Constants.LAST_APPEAR_CITY_LTIME));
+			Date last_appear_city_ltime_d = PostUtil.dateToStr(last_appear_city_ltime);
+
+			//系统时间
+			Date sysTime = new Date(System.currentTimeMillis());
+			
+			/**
+			 * 检查本条数据是否满足抽样条件，不满足条件的不需要处理。
+			 */
+			//检查抽样期限：
+			long days = PostUtil.getDateDiff(sysTime, biz_date_d);
+			if (days != DRAWN_DAYS) {
+				return;
+			}
+
+			//检查寄达范围。(要求：省内异地 or 国内异地)
+			if (!reach_range.equals("2") && !reach_range.equals("3")) {
+				return;
+			}
+
+			//检查寄出/寄达地。(要求：寄出地 <> 寄达地)
+			if (send_city_code.equals(dest_city_code)) {
+				return;
+			}
+			
+			//其他检查。(要求：揽收/第一次状态城市 = 最早出现城市)
+			if (!send_city_code.equals(first_appear_city)) {
+				return;
+			}
+
+			//其他检查。(要求：派送/签收状态城市 = 最晚出现城市)
+			if (!dest_city_code.equals(last_appear_city)) {
+				return;
+			}
+
+			//其他检查。(要求：最早出现城市最晚处理时间 > 实际揽收时间)
+			if (first_appear_city_ltime_d.compareTo(coll_time_d) <= 0) {
+				return;
+			}
+
+			//其他检查。(要求：最晚出现城市最早处理时间 > 最早出现城市最晚处理时间)
+			if (last_appear_city_ftime_d.compareTo(first_appear_city_ltime_d) <= 0) {
+				return;
+			}
+
+			//其他检查。(要求：实际派送时间 > 最晚出现城市最早处理时间)
+			if (disp_time_d.compareTo(last_appear_city_ftime_d) <= 0) {
+				return;
+			}
+
+			//其他检查。(要求：实际签收时间 > 实际派送时间)
+			if (sign_time_d.compareTo(disp_time_d) <= 0) {
+				return;
+			}
+
+			/**
+			 * 满足抽样条件时，检查本条数据是否满足各个时限测试统计条件
+			 */
+			//环节时限统计条件是否满足 Y满足 N 不满足
+			String is_step_count = NO;
+			if (first_appear_city_ltime_d.compareTo(coll_time_d) > 0
+					&& last_appear_city_ltime_d.compareTo(last_appear_city_ftime_d) > 0
+					&& disp_time_d.compareTo(first_appear_city_ltime_d) > 0
+					&& sign_time_d.compareTo(disp_time_d) > 0
+					&& send_city_code.equals(first_appear_city)
+					&& dest_city_code.equals(last_appear_city)) {
+				is_step_count = YES;
+			}
+
+			//产品时限统计条件是否满足 Y满足 N 不满足
+			String is_product_count = NO;
+
+			//全国城市时限测试统计条件是否满足 Y满足 N不满足
+			String is_city_limit_time_count = NO;
+			if (!send_city_code.equals(dest_city_code)) {
+				is_city_limit_time_count = YES;
+			}
+
+			//同城标志 Y同城 N异地
+			String is_city_traffic_count = NO;
+			if (!send_city_code.equals(dest_city_code)) {
+				is_city_traffic_count = YES;
+			}
+			
+			/**
+			 * 进行数据库登录的处理
+			 */
+			String[] splited = {
+            	//0:企业
+            	enterprise_code,
+            	//1:详情单号码
+        		mail_no,
+        		//2:业务日期
+        		biz_date,
+        		//3:产品类型
+        		product_type,
+        		//4:产品时限
+        		"",
+        		//5:寄达范围 （同城/省内异地/国内异地/港澳台/国际）
+        		reach_range,
+        		//6:全程时间 （签收时间-实际揽收时间）
+        		String.valueOf(PostUtil.getDateDiff(sign_time_d, coll_time_d)),
+        		//7:寄出城市 （实际揽收网点/最早扫描网点）所在城市
+        		send_city_code,
+        		//8:发件省份 （实际揽收网点/最早扫描网点）所在省份
+        		PostUtil.convCityToProv(send_city_code),
+        		//9:目的城市 （实际签收网点/实际派送网点）所在城市
+        		dest_city_code,
+        		//10:目的省份 （实际签收网点/实际派送网点）所在省份
+        		PostUtil.convCityToProv(dest_city_code),
+        		//11:寄出地处理时间 寄出城市最晚扫描时间-揽收时间
+        		String.valueOf(PostUtil.getDateDiff(first_appear_city_ltime_d, coll_time_d)),
+        		//12:运输时间 目的城市最早扫描时间-寄出城市最晚扫描时间
+        		String.valueOf(PostUtil.getDateDiff(last_appear_city_ftime_d, first_appear_city_ltime_d)),
+        		//13:寄达地处理时间 目的城市最晚扫描时间（派送时间）-目的城市最早扫描时间
+        		String.valueOf(PostUtil.getDateDiff(disp_time_d, last_appear_city_ftime_d)),
+        		//14:投递时间  签收时间-派送时间
+        		String.valueOf(PostUtil.getDateDiff(sign_time_d, disp_time_d)),
+        		//15:环节统计条件满情况 y-是 n-否
+        		is_step_count,
+        		//16:产品统计条件 y-是 n-否
+        		is_product_count,
+        		//17:城市时限测试统计条件 y-是 n-否
+        		is_city_limit_time_count,
+        		//18:同城统计条件是否满足 y-是 n-否
+        		is_city_traffic_count,
+        		//19:揽收时间
+        		coll_time,
+        		//20:揽收网点
+        		coll_station,
+        		//21:派送时间
+        		disp_time,
+        		//22:签收时间
+        		sign_time,
+        		//23:第一次扫描时间
+        		first_time,
+        		//24:寄出地城市代码
+        		send_city_code,
+        		//25:目的地城市代码
+        		dest_city_code,
+        		//26:最早处理城市
+        		first_appear_city,
+        		//27:最早处理城市最早处理时间
+        		first_appear_city_ftime,
+        		//28:最早处理城市最晚处理时间
+        		first_appear_city_ltime,
+        		//29:最晚处理城市
+        		last_appear_city,
+        		//30:最晚处理城市最早处理时间
+        		last_appear_city_ftime,
+        		//31:最晚处理城市最晚处理时间
+        		last_appear_city_ltime,
+            };
+
+            Put put = new Put(Bytes.toBytes(key.toString()));
+            for(int i = 0; i < splited.length; i++) {
+                byte[] i_name = Bytes.toBytes(DrawnSampleWiter.getCulomnNameByIndex(i));
+                byte[] i_values = Bytes.toBytes(splited[i]);
+
+                put.addColumn(FAMILY_CY, i_name, i_values);
+                context.write(null, put);
+            }
+        }
+	}
+
+	/**
+	 * Main
+	 * @param args
+	 * @throws Exception
+	 */
+	public static void main(String[] args) throws Exception {
+		Configuration config = new Configuration();
+		config.set("fs.defautl.name", "dscn31:9000");
+		config.set("hbase.zookeeper.property.clientPort", "2181");
+		config.set("hbase.zookeeper.quorum", "dscn31,dscn32,dscn33");
+		config.set("dfs.socket.timeout", "180000");
+        config.set(TableOutputFormat.OUTPUT_TABLE, "qchtest_chouyang");
+
+		Job job = Job.getInstance(config);
+		// 设置作业名称
+		job.setJobName("DrawnSample");
+		// 设置作业执行类
+		job.setJarByClass(DrawnSample.class);
+		// 设置输出类型
+        job.setMapOutputKeyClass(ImmutableBytesWritable.class);
+        job.setMapOutputValueClass(Put.class);
+        // 设置Reduce数
+        job.setNumReduceTasks(0);
+        job.setOutputFormatClass(TableOutputFormat.class);
+
+        // 查询条件
+		Scan scan = new Scan();
+		// 设置hbase作为map的输入条件
+		TableMapReduceUtil.initTableMapperJob(
+				"YZ_CLJG_LSKJ", scan, DrawnSampleMapper.class, ImmutableBytesWritable.class, Put.class, job);
+
+		if (job.waitForCompletion(true)) {
+			System.exit(0);
+		} else {
+			System.exit(1);
+		}
+	}
+}
